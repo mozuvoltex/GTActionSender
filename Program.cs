@@ -3,47 +3,58 @@
     using CsvHelper;
     using Microsoft.Extensions.Configuration;
     using Rug.Osc;
+    using System;
     using System.Globalization;
     using System.Net;
 
     /*
      * TODO:
-     * multi-target support via targetList
+     * fill out the README
      * input validation
      * error checking
      */
 
-    internal readonly struct Instructions(float maxSpeed, List<Tuple<float, uint>> actions)
+    internal class JsonEntry
     {
-        public readonly float m_maxSpeed = maxSpeed;
-        public readonly List<Tuple<float, uint>> m_actions = actions;
+        public int DeviceIndex { get; set; }
+        public char ActionType { get; set; }
+        public float Value { get; set; }
+        public int Delay { get; set; }
+    }
+
+    internal class Action
+    {
+        public required OscMessage Message { get; set; }
+        public int Delay { get; set; }
     }
 
     internal class Program
     {
-        private static Instructions ParseInstructions(string filepath)
-        {
-            List<Tuple<float, uint>> actions = [];
+        private static readonly string UniversalPrefix = "/avatar/parameters/";
 
+        private static List<Action> ParseJsonToActions(string filepath, string maxSpeedParameter, List<string> targetList)
+        {
             using StreamReader reader = new(filepath);
             using CsvReader csv = new(reader, CultureInfo.InvariantCulture);
 
-            csv.Read();
-            csv.ReadHeader();
-
-            // maxSpeed
-            csv.Read();
-            float maxSpeed = Math.Clamp(csv.GetField<float>(0), 0.0f, 1.0f);
-
-            // actions
-            while (csv.Read())
+            List<Action> actions = [];
+            IEnumerable<JsonEntry>? records = csv.GetRecords<JsonEntry>();
+            foreach (JsonEntry entry in records)
             {
-                float intensity = Math.Clamp(csv.GetField<float>(0), 0.0f, 1.0f);
-                uint duration = csv.GetField<uint>(1);
-                actions.Add(new(intensity, duration));
+                string target;
+                if (entry.ActionType == 's')
+                    target = UniversalPrefix + maxSpeedParameter;
+                else if (entry.ActionType == 'p')
+                    target = UniversalPrefix + targetList[entry.DeviceIndex];
+                else
+                    return [];
+
+                float clampedValue = Math.Clamp(entry.Value, 0.0f, 1.0f);
+                OscMessage message = new(target, clampedValue);
+                actions.Add(new Action { Message = message, Delay = entry.Delay });
             }
 
-            return new(maxSpeed, actions);
+            return actions;
         }
 
         private static void Main(string[] args)
@@ -52,41 +63,44 @@
             string iniPath = argsConfig["iniPath"] ?? string.Empty;
             string csvPath = argsConfig["headpatCsv"] ?? string.Empty;
 
+            Console.WriteLine("Parsing ini from {0}", iniPath);
             IConfiguration iniConfig = new ConfigurationBuilder().AddIniFile(iniPath).Build();
             IConfigurationSection iniSetupSection = iniConfig.GetRequiredSection("Setup");
             int oscPort = int.Parse(iniSetupSection["port_rx"] ?? string.Empty);
-            string targetListText = iniSetupSection["proximity_parameters_multi"] ?? string.Empty;
             string maxSpeedParameter = iniSetupSection["max_speed_parameter"] ?? string.Empty;
+            string targetListText = iniSetupSection["proximity_parameters_multi"] ?? string.Empty;          
             List<string> targetList = [.. targetListText.Split(' ')];
-            string oscTarget = string.Format("/avatar/parameters/{0}", targetList[0]);
 
-            Instructions instructions = ParseInstructions(csvPath);
-            if (instructions.m_actions.Count == 0)
+            Console.WriteLine("Parsing csv from {0}", csvPath);
+            List<Action> actions = ParseJsonToActions(csvPath, maxSpeedParameter, targetList);
+            if (actions.Count == 0)
             {
                 Console.WriteLine("No instructions read!");
                 return;
             }
 
-            OscSender m_Sender = new(IPAddress.Loopback, oscPort);
-            m_Sender.Connect();
+            OscSender oscSender = new(IPAddress.Loopback, oscPort);
+            oscSender.Connect();
 
-            // send max speed command
-            Console.WriteLine("Setting {0} to {1:P0}", maxSpeedParameter, instructions.m_maxSpeed);
-            string maxSpeedTarget = string.Format("/avatar/parameters/{0}", maxSpeedParameter);
-            m_Sender.Send(new OscMessage(maxSpeedTarget, instructions.m_maxSpeed));
-
-            // send actions
-            foreach (Tuple<float, uint> action in instructions.m_actions)
+            // send all commands parsed
+            foreach (Action action in actions)
             {
-                Console.WriteLine("Sending intensity {0} for {1} milliseconds", action.Item1, action.Item2);
-                m_Sender.Send(new OscMessage(oscTarget, action.Item1));
-                Thread.Sleep((int)action.Item2);
+                Console.WriteLine("Sending {0}", action.Message);
+                oscSender.Send(action.Message);
+
+                if (action.Delay > 0)
+                {
+                    Console.WriteLine("Waiting {0}ms", action.Delay);
+                    Thread.Sleep(action.Delay);
+                }
             }
 
-            // send an off command and disconnect
+            // send a stop command to all devices and disconnect
             Console.WriteLine("Shutting down");
-            m_Sender.Send(new OscMessage(oscTarget, 0.0f));
-            m_Sender.Close();
+            foreach (string target in targetList)
+                oscSender.Send(new OscMessage(UniversalPrefix + target, 0.0f));
+
+            oscSender.Close();
         }
     }
 }
