@@ -9,15 +9,14 @@
 
     /*
      * TODO:
-     * fill out the README
      * input validation
      * error checking
      */
 
     internal class JsonEntry
     {
-        public int DeviceIndex { get; set; }
         public char ActionType { get; set; }
+        public int DeviceIndex { get; set; }
         public float Value { get; set; }
         public int Delay { get; set; }
     }
